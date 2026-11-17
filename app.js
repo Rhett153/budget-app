@@ -466,9 +466,7 @@ function loadMarketWidget() {
       { s: 'FOREXCOM:SPXUSD', d: 'S&P 500' },
       { s: 'FOREXCOM:NSXUSD', d: 'Nasdaq 100' },
       { s: 'FOREXCOM:DJI', d: 'Dow Jones' },
-      { s: 'TSX:TSX', d: 'S&P/TSX Composite' }
-      ] },
-      { title: 'Companies', symbols: [
+      { s: 'TSX:TSX', d: 'S&P/TSX Composite' },
         { s: 'NASDAQ:AAPL', d: 'Apple' },
         { s: 'NASDAQ:MSFT', d: 'Microsoft' }
       ] }
