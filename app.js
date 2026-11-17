@@ -461,12 +461,18 @@ function loadMarketWidget() {
     colorTheme: 'light', dateRange: '1D', locale: 'en', largeChartUrl: '',
     isTransparent: true, showFloatingTooltip: false, width: '100%', height: '420',
     showSymbolLogo: false, showChart: false, displayMode: 'regular',
-    tabs: [{ title: 'North America', symbols: [
+    tabs: [
+      { title: 'North America', symbols: [
       { s: 'FOREXCOM:SPXUSD', d: 'S&P 500' },
       { s: 'FOREXCOM:NSXUSD', d: 'Nasdaq 100' },
       { s: 'FOREXCOM:DJI', d: 'Dow Jones' },
       { s: 'TSX:TSX', d: 'S&P/TSX Composite' }
-    ] }]
+      ] },
+      { title: 'Companies', symbols: [
+        { s: 'NASDAQ:AAPL', d: 'Apple' },
+        { s: 'NASDAQ:MSFT', d: 'Microsoft' }
+      ] }
+    ]
   });
   script.onerror = function () {
     container.dataset.loaded = '';
