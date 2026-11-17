@@ -2,6 +2,8 @@
 
 A local-first budgeting workspace published as a static site. It lets one person keep a private encrypted budget vault in a modern browser, enter transactions, import CSV statements, save PDFs, generate a monthly spending plan, and track savings goals.
 
+See [SCHEMA.md](SCHEMA.md) for the IndexedDB and encrypted payload schema.
+
 ## What works
 
 - Create and unlock a passphrase-protected vault stored in this browser using IndexedDB, PBKDF2, and AES-GCM.
