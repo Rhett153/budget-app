@@ -17,7 +17,7 @@ Only a browser publishable/anon key belongs in this static site. It is designed 
 
 1. Deploy the configured static site over HTTPS.
 2. Create or unlock your local encrypted vault and make an encrypted backup.
-3. Open **Privacy & backups**, enter your email, and select **Send sign-in link**. Open the email on the same device/browser and confirm the account.
+3. Open **Settings**, enter your email, and select **Send sign-in link**. Open the email on the same device/browser and confirm the account.
 4. Return to the app and select **Add a passkey on this device**. Follow the browser or password manager prompt. Register another passkey on any device you want to use if your passkey provider does not sync them.
 5. Select **Enable encrypted sync** and accept the in-app disclosure. The app uploads the encrypted vault envelope to your Supabase project.
 

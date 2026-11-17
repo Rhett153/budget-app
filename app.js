@@ -228,6 +228,16 @@ async function saveCloudRevision(record, expectedRevision) {
   return revision;
 }
 
+function isPristineVault(data) {
+  const settings = data && data.settings || {};
+  return Boolean(data && !settings.cloudSyncEnabled &&
+    (!Array.isArray(data.transactions) || data.transactions.length === 0) &&
+    (!Array.isArray(data.statements) || data.statements.length === 0) &&
+    (!Array.isArray(data.goals) || data.goals.length === 0) &&
+    (!data.plans || Object.keys(data.plans).length === 0) &&
+    !(Number(settings.monthlyIncome) > 0));
+}
+
 async function prepareCloudVault() {
   if (!cloudSession || !window.BudgetCloud || !window.BudgetCloud.isConfigured()) return;
   try {
@@ -246,7 +256,7 @@ async function prepareCloudVault() {
       vaultRecord = await dbGet();
       await deviceRecordPut({ id: 'cloud-sync-state', revision: cloudRevision, lastSyncedUpdatedAt: remote.record.updatedAt });
       setCloudStatus('Downloaded the encrypted vault. Enter its passphrase to unlock it on this device.');
-      return;
+      return 'downloaded';
     }
     if (meta && cloudRevision > Number(meta.revision || 0) && local.updatedAt === meta.lastSyncedUpdatedAt) {
       await dbPut(Object.assign({}, remote.record, { id: 'primary' }));
@@ -264,9 +274,21 @@ async function prepareCloudVault() {
       setCloudStatus('Signed in. Cloud vault is up to date' + (appData && appData.settings.cloudSyncEnabled ? '.' : '; enable sync to start sharing this vault.') );
       return;
     }
+    if (!meta && appData && isPristineVault(appData)) {
+      await dbPut(Object.assign({}, remote.record, { id: 'primary' }));
+      vaultRecord = await dbGet();
+      cloudRevision = Number(remote.revision) || 0;
+      await deviceRecordPut({ id: 'cloud-sync-state', revision: cloudRevision, lastSyncedUpdatedAt: remote.record.updatedAt });
+      await deviceRecordDelete('remembered-vault-key');
+      vaultKey = null;
+      appData = null;
+      setCloudStatus('Found your synced vault. Enter the passphrase you use on your other device to unlock it here.');
+      showGate(false);
+      return 'needs-unlock';
+    }
     setCloudStatus('A cloud vault exists, but this device has changes that are not confirmed as synced. It was left untouched to prevent overwriting data.');
   } catch (error) {
-    setCloudStatus('Cloud check failed: ' + (error.message || 'try again from Privacy & backups.'));
+    setCloudStatus('Cloud check failed: ' + (error.message || 'try again from Settings.'));
   }
 }
 
@@ -1049,7 +1071,9 @@ async function startApp() {
     try {
       vaultRecord = await dbGet();
       const unlocked = await decryptRecord(vaultRecord, $('#unlockPassphrase').value);
-      vaultKey = unlocked.key; appData = unlocked.data; selectedMonth = monthKey(new Date()); setDefaultMonthPicker(); showApp();
+      vaultKey = unlocked.key; appData = unlocked.data; selectedMonth = monthKey(new Date()); setDefaultMonthPicker();
+      if (cloudSession && await prepareCloudVault() === 'needs-unlock') return;
+      showApp();
       await saveRememberedKey(vaultKey, $('#rememberUnlockDevice').checked);
     } catch (error) { showGate(false, error.message || 'Could not unlock this vault.'); }
   });
@@ -1300,6 +1324,7 @@ async function startApp() {
           appData = unlocked.data;
           selectedMonth = monthKey(new Date());
           setDefaultMonthPicker();
+          if (cloudSession && await prepareCloudVault() === 'needs-unlock') return;
           showApp();
           showToast('Vault reopened on this device.');
           return;
