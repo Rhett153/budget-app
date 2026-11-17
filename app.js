@@ -390,7 +390,7 @@ function renderPageTitle() {
   const active = $('.nav-link.active');
   if (!active) return;
   const page = active.dataset.page;
-  const title = page === 'settings' ? 'Privacy & backups' : page.charAt(0).toUpperCase() + page.slice(1);
+  const title = page === 'settings' ? 'Settings' : page.charAt(0).toUpperCase() + page.slice(1);
   $('#breadcrumbPage').textContent = title;
 }
 
