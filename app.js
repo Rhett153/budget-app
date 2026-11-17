@@ -7,7 +7,7 @@ const DEVICE_STORE = 'device';
 const KDF_ITERATIONS = 310000;
 const MAX_STATEMENT_BYTES = 5 * 1024 * 1024;
 const CATEGORIES = ['Housing', 'Utilities', 'Groceries', 'Dining', 'Transportation', 'Health', 'Debt', 'Subscriptions', 'Shopping', 'Personal care', 'Education', 'Travel', 'Income', 'Other'];
-const DEFAULT_STATE = { transactions: [], statements: [], goals: [], plans: {}, settings: { monthlyIncome: 0 } };
+const DEFAULT_STATE = { transactions: [], statements: [], goals: [], plans: {}, settings: { monthlyIncome: 0, investmentPercent: 0 } };
 const $ = function (selector) { return document.querySelector(selector); };
 const $$ = function (selector) { return Array.from(document.querySelectorAll(selector)); };
 
@@ -163,7 +163,7 @@ function normalizeState(value) {
     statements: Array.isArray(data.statements) ? data.statements : [],
     goals: Array.isArray(data.goals) ? data.goals : [],
     plans: data.plans && typeof data.plans === 'object' ? data.plans : {},
-    settings: Object.assign({ monthlyIncome: 0 }, data.settings || {})
+    settings: Object.assign({ monthlyIncome: 0, investmentPercent: 0 }, data.settings || {})
   };
 }
 
@@ -235,6 +235,7 @@ function isPristineVault(data) {
     (!Array.isArray(data.statements) || data.statements.length === 0) &&
     (!Array.isArray(data.goals) || data.goals.length === 0) &&
     (!data.plans || Object.keys(data.plans).length === 0) &&
+    !(Number(settings.investmentPercent) > 0) &&
     !(Number(settings.monthlyIncome) > 0));
 }
 
@@ -405,7 +406,74 @@ function renderAll() {
   renderBudget();
   renderStatements();
   renderGoals();
+  renderMarkets();
   renderPageTitle();
+}
+
+function investmentIncomeBasis() {
+  const selected = currentMonthDate();
+  const monthKeys = [];
+  for (let offset = 2; offset >= 0; offset -= 1) monthKeys.push(monthKey(new Date(selected.getFullYear(), selected.getMonth() - offset, 1)));
+  const recentIncome = appData.transactions.filter(function (transaction) {
+    return Number(transaction.amount) > 0 && monthKeys.includes(String(transaction.date || '').slice(0, 7));
+  });
+  const monthsWithIncome = new Set(recentIncome.map(function (transaction) { return String(transaction.date).slice(0, 7); }));
+  if (recentIncome.length) return recentIncome.reduce(function (sum, transaction) { return sum + Number(transaction.amount); }, 0) / Math.max(1, monthsWithIncome.size);
+  return Number(appData.settings.monthlyIncome) || 0;
+}
+
+function renderMarkets() {
+  if (!appData || !$('#investPercentInput')) return;
+  const percentage = Math.min(20, Math.max(0, Number(appData.settings.investmentPercent) || 0));
+  const income = investmentIncomeBasis();
+  const contribution = income * percentage / 100;
+  $('#investPercentInput').value = String(percentage);
+  $('#investPercentLabel').textContent = String(percentage);
+  $('#marketIncomeBasis').textContent = formatMoney(income);
+  $('#marketInvestAmount').textContent = formatMoney(contribution);
+  $('#marketTipAmount').textContent = 'At ' + percentage + '%, that is ' + formatMoney(contribution) + ' per month, based on ' + formatMoney(income) + ' monthly income.';
+  $('#investIncomeBasisLabel').textContent = income > 0 ? 'Average monthly income from your recent 3-month history, or saved income' : 'Add income transactions or set income in Budget plan to estimate this amount.';
+
+  const tips = [
+    ['Keep a long-term view', 'A single market session can be noisy. Consider your time horizon and cash needs before changing a long-term investing plan.'],
+    ['A down day is not a deadline', 'Broad markets rise and fall. If you invest, a repeatable amount you can afford may help reduce pressure to time every move.'],
+    ['Avoid chasing a rally', 'Strong market days can tempt people to buy based on excitement. Revisit your goals, diversification, and risk comfort before making changes.'],
+    ['Protect near-term cash', 'Money needed soon for bills or emergencies may not belong in volatile investments, even when markets are rising.'],
+    ['Spread risk thoughtfully', 'One index does not represent every company or region. Learn how diversification and fees affect the investments you are considering.'],
+    ['Choose a sustainable amount', 'A contribution should fit after essentials, debt obligations, and emergency savings. You can set this app’s optional estimate to 0% at any time.'],
+    ['Review the plan, not every tick', 'Daily price changes are one part of the picture. A regular review schedule can help keep short-term headlines in perspective.']
+  ];
+  const now = new Date();
+  const localDay = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+  const tip = tips[Math.floor(localDay / 86400000) % tips.length];
+  $('#marketTipTitle').textContent = tip[0];
+  $('#marketTipText').textContent = tip[1];
+}
+
+function loadMarketWidget() {
+  const container = $('#tradingViewMarketWidget');
+  if (!container || container.dataset.loaded) return;
+  container.dataset.loaded = 'true';
+  const script = document.createElement('script');
+  script.src = 'https://s3.tradingview.com/external-embedding/embed-widget-market-overview.js';
+  script.async = true;
+  script.textContent = JSON.stringify({
+    colorTheme: 'light', dateRange: '1D', locale: 'en', largeChartUrl: '',
+    isTransparent: true, showFloatingTooltip: false, width: '100%', height: '420',
+    showSymbolLogo: false, showChart: false, displayMode: 'regular',
+    tabs: [{ title: 'North America', symbols: [
+      { s: 'FOREXCOM:SPXUSD', d: 'S&P 500' },
+      { s: 'FOREXCOM:NSXUSD', d: 'Nasdaq 100' },
+      { s: 'FOREXCOM:DJI', d: 'Dow Jones' },
+      { s: 'TSX:TSX', d: 'S&P/TSX Composite' }
+    ] }]
+  });
+  script.onerror = function () {
+    container.dataset.loaded = '';
+    const note = $('#marketWidgetStatus');
+    if (note) { note.textContent = 'Market quotes could not load. Check your connection and reopen the Markets tab.'; note.hidden = false; }
+  };
+  container.appendChild(script);
 }
 
 function renderPageTitle() {
@@ -420,6 +488,7 @@ function showPage(page) {
   $$('.nav-link[data-page]').forEach(function (button) { button.classList.toggle('active', button.dataset.page === page); });
   $$('.page-view').forEach(function (view) { view.hidden = view.id !== 'view-' + page; });
   renderPageTitle();
+  if (page === 'markets') { renderMarkets(); loadMarketWidget(); }
   if (window.innerWidth <= 560) window.scrollTo(0, 0);
 }
 
@@ -1086,6 +1155,13 @@ async function startApp() {
   $('#lockVaultButton').addEventListener('click', function () { lockVault(); });
   $('#lockQuickButton').addEventListener('click', function () { lockVault(); });
   $('#monthPicker').addEventListener('change', function (event) { if (event.target.value) { selectedMonth = event.target.value; renderAll(); } });
+  $('#investPercentInput').addEventListener('input', function (event) {
+    appData.settings.investmentPercent = Number(event.target.value);
+    renderMarkets();
+  });
+  $('#investPercentInput').addEventListener('change', function () {
+    persist().then(function () { showToast('Investing estimate saved to your encrypted budget.'); }).catch(function () { showToast('Could not save the investing estimate.', true); });
+  });
   $('#transactionSearch').addEventListener('input', renderTransactions);
   $('#transactionTypeFilter').addEventListener('change', renderTransactions);
   $('#transactionCategoryFilter').addEventListener('change', renderTransactions);

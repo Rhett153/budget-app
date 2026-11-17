@@ -46,6 +46,7 @@ type VaultPayload = {
   plans: Record<MonthKey, BudgetPlan>;
   settings: {
     monthlyIncome: number;
+    investmentPercent?: number; // Optional monthly income allocation estimate (0–20)
     cloudSyncEnabled?: boolean;
   };
 };
