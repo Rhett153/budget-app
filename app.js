@@ -391,8 +391,8 @@ function renderBudget() {
 function statementMarkup(statement, detailed) {
   const isPdf = statement.kind === 'pdf';
   const icon = isPdf ? '<span class="statement-logo pdf-logo">PDF</span>' : '<span class="statement-logo">CSV</span>';
-  const detail = isPdf ? 'Encrypted PDF · ' + prettyBytes(statement.size || 0) : 'CSV import · ' + Number(statement.importedCount || 0) + ' transactions';
-  const actions = detailed ? '<span class="statement-ready">Encrypted</span>' + (isPdf ? '<button class="download-button" data-download-statement="' + escapeHtml(statement.id) + '" aria-label="Download PDF">↓</button>' : '') + '<button class="download-button" data-delete-statement="' + escapeHtml(statement.id) + '" aria-label="Remove statement">×</button>' : '<span class="statement-ready">Saved here</span>';
+  const detail = isPdf ? 'Encrypted PDF · ' + prettyBytes(statement.size || 0) : (statement.content ? 'Encrypted CSV · ' : 'CSV import · ') + Number(statement.importedCount || 0) + ' transactions';
+  const actions = detailed ? '<span class="statement-ready">Encrypted</span>' + (statement.content ? '<button class="download-button" data-download-statement="' + escapeHtml(statement.id) + '" aria-label="Download ' + (isPdf ? 'PDF' : 'CSV') + '">↓</button>' : '') + '<button class="download-button" data-delete-statement="' + escapeHtml(statement.id) + '" aria-label="Remove statement">×</button>' : '<span class="statement-ready">Saved here</span>';
   return '<div class="statement-item">' + icon + '<span class="statement-info"><strong>' + escapeHtml(statement.name || 'Statement') + '</strong><small>' + escapeHtml(detail) + ' · ' + escapeHtml(formatShortDate(statement.addedAt)) + '</small></span>' + actions + '</div>';
 }
 
@@ -595,7 +595,7 @@ async function handleSelectedStatement(file) {
   if (extension === 'csv' || file.type === 'text/csv') {
     try {
       const transactions = parseCsvTransactions(await file.text(), file.name);
-      pendingImport = { kind: 'csv', fileName: file.name.slice(0, 100), transactions: transactions };
+      pendingImport = { kind: 'csv', fileName: file.name.slice(0, 100), transactions: transactions, size: file.size, content: await fileToBase64(file) };
       renderImportPreview();
     } catch (error) { showToast(error.message || 'Could not read this CSV.', true); }
     return;
@@ -630,7 +630,7 @@ async function confirmImport() {
   const existing = new Set(appData.transactions.map(duplicateKey));
   const additions = pendingImport.transactions.filter(function (transaction) { return !existing.has(duplicateKey(transaction)); });
   appData.transactions.push.apply(appData.transactions, additions);
-  appData.statements.push({ id: id(), kind: 'csv', name: pendingImport.fileName, importedCount: additions.length, addedAt: new Date().toISOString() });
+  appData.statements.push({ id: id(), kind: 'csv', name: pendingImport.fileName, importedCount: additions.length, size: pendingImport.size, content: pendingImport.content, addedAt: new Date().toISOString() });
   await persist();
   pendingImport = null;
   closeDialog('importDialog');
@@ -751,9 +751,12 @@ async function downloadStatement(idValue) {
   const statement = appData.statements.find(function (item) { return item.id === idValue; });
   if (!statement || !statement.content) return;
   const bytes = base64ToBytes(statement.content);
-  const url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+  const isPdf = statement.kind === 'pdf';
+  const extension = isPdf ? '.pdf' : '.csv';
+  const mimeType = isPdf ? 'application/pdf' : 'text/csv;charset=utf-8';
+  const url = URL.createObjectURL(new Blob([bytes], { type: mimeType }));
   const anchor = document.createElement('a');
-  anchor.href = url; anchor.download = statement.name.toLowerCase().endsWith('.pdf') ? statement.name : statement.name + '.pdf';
+  anchor.href = url; anchor.download = statement.name.toLowerCase().endsWith(extension) ? statement.name : statement.name + extension;
   document.body.appendChild(anchor); anchor.click(); anchor.remove(); URL.revokeObjectURL(url);
 }
 

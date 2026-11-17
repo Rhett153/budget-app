@@ -6,7 +6,7 @@ A local-first budgeting workspace published as a static site. It lets one person
 
 - Create and unlock a passphrase-protected vault stored in this browser using IndexedDB, PBKDF2, and AES-GCM.
 - Add, edit, filter, and delete income and expense transactions.
-- Import CSV files with common date, amount, debit/credit, description, and category columns. Imports are previewed and likely duplicates are skipped.
+- Import CSV files with common date, amount, debit/credit, description, and category columns. Imports are previewed and likely duplicates are skipped; the source CSV is saved in the encrypted vault and can be downloaded later.
 - Save PDF statements encrypted in the vault and download them again later. PDF text extraction is not included.
 - Generate a budget from up to three months of transaction history, edit category limits, and record savings goals.
 - Export and restore an encrypted backup, change the vault passphrase, lock the vault, or delete it from this browser.
