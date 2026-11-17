@@ -7,11 +7,11 @@ Cloud sync is off until all setup below is complete and the user selects **Enabl
 1. Create a Supabase project and confirm its Auth email flow works.
 2. In the Supabase SQL Editor, run the contents of [`supabase-schema.sql`](supabase-schema.sql). It creates the encrypted vault table, owner-only read policy, and revision-checked write function.
 3. In **Authentication → Sign In / Providers**, enable passkey authentication. Supabase currently marks its passkey feature as experimental.
-4. Configure the relying party ID as `rhett153.github.io` and allow the production origin `https://rhett153.github.io`. Add `http://localhost` only if testing locally. If the app moves to a different domain later, passkeys may need to be registered again.
-5. Set the site URL and redirect URL allow-list to `https://rhett153.github.io/budget-app/` (and `http://localhost:PORT/` for local development, if used). The email sign-in link returns to the current app URL.
-6. In `supabase-config.js`, set `url` to the Supabase Project URL and `publishableKey` to the project's publishable key (or legacy anon key).
+4. In **Authentication → Passkeys**, enable passkeys. Use a display name such as `Budget App`, relying party ID `rhett153.github.io`, and allowed origin `https://rhett153.github.io` (an origin has no path). Keep the relying party ID stable after registering passkeys.
+5. In **Authentication → URL Configuration**, set the Site URL to `https://rhett153.github.io/budget-app/` and add that exact URL to the Redirect URLs allow-list. The email sign-in link returns to the app. Do not add `localhost` to this production passkey configuration; local testing needs a separate matching RP setup.
+6. Open the project's **Connect** dialog or **Settings → API Keys**. In `supabase-config.js`, set `url` to the Project URL and `publishableKey` to the project's publishable key (or legacy anon key).
 
-Only a browser publishable/anon key belongs in this static site. Never put a `service_role` or other secret key in this repository. Keep the RLS rules and SQL write function in place.
+Only a browser publishable/anon key belongs in this static site. It is designed for client use, but the public repository exposes it, so the table's owner-only RLS and write function must remain in place. Never put a `service_role`, secret key, database password, or other server credential in this repository. Commit and push `supabase-config.js` to publish the configuration.
 
 ## 2. First account and first device
 
