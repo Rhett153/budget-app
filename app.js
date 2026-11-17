@@ -523,7 +523,7 @@ function statementMarkup(statement, detailed) {
   const icon = isPdf ? '<span class="statement-logo pdf-logo">PDF</span>' : isImage ? '<span class="statement-logo">IMG</span>' : '<span class="statement-logo">CSV</span>';
   const fileType = isPdf ? 'PDF' : isImage ? 'image' : 'CSV';
   const detail = isPdf || isImage ? 'Encrypted ' + fileType + ' · ' + prettyBytes(statement.size || 0) + (statement.importedCount == null ? '' : ' · ' + Number(statement.importedCount) + ' transactions') : (statement.content ? 'Encrypted CSV · ' : 'CSV import · ') + Number(statement.importedCount || 0) + ' transactions';
-  const actions = detailed ? '<span class="statement-ready">Encrypted</span>' + (statement.content ? '<button class="download-button" data-download-statement="' + escapeHtml(statement.id) + '" aria-label="Download ' + fileType + '">↓</button>' : '') + '<button class="download-button" data-delete-statement="' + escapeHtml(statement.id) + '" aria-label="Remove statement">×</button>' : '<span class="statement-ready">Saved here</span>';
+  const actions = detailed ? '<span class="statement-ready">Encrypted</span>' + (statement.content && (isPdf || isImage) ? '<button class="row-action" data-process-statement="' + escapeHtml(statement.id) + '">' + (statement.importedCount == null ? 'Read transactions' : 'Read again') + '</button>' : '') + (statement.content ? '<button class="download-button" data-download-statement="' + escapeHtml(statement.id) + '" aria-label="Download ' + fileType + '">↓</button>' : '') + '<button class="download-button" data-delete-statement="' + escapeHtml(statement.id) + '" aria-label="Remove statement">×</button>' : '<span class="statement-ready">Saved here</span>';
   return '<div class="statement-item">' + icon + '<span class="statement-info"><strong>' + escapeHtml(statement.name || 'Statement') + '</strong><small>' + escapeHtml(detail) + ' · ' + escapeHtml(formatShortDate(statement.addedAt)) + '</small></span>' + actions + '</div>';
 }
 
@@ -688,26 +688,41 @@ function parseCsvTransactions(text, filename) {
 }
 
 function parseStatementTransactions(text, filename) {
-  const datePattern = /\b(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},?\s+\d{4})\b/i;
-  const amountPattern = /(?:\(\s*)?-?\s*\$?\s*\d[\d,]*\.\d{2}\s*\)?/g;
+  const datePattern = /\b(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.]\d{1,2}(?:[-/.]\d{2,4})?|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2}(?:,?\s+\d{4})?)\b/i;
+  const amountPattern = /(?:\(\s*)?-?\s*\$?\s*\d[\d,]*\.\d{2}\s*\)?-?/g;
+  const allText = String(text || '').replace(/\u00a0/g, ' ');
+  const yearMatch = allText.match(/\b(20\d{2})\b/);
+  const statementYear = yearMatch ? Number(yearMatch[1]) : new Date().getFullYear();
   const transactions = [];
-  String(text || '').split(/\r?\n/).map(function (line) { return line.replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim(); }).filter(Boolean).forEach(function (line, rowNumber) {
+  const lines = allText.split(/\r?\n/).map(function (line) { return line.replace(/\s+/g, ' ').trim(); }).filter(Boolean);
+  const rows = [];
+  lines.forEach(function (line) {
+    if (datePattern.test(line)) rows.push(line);
+    else if (rows.length && !/^(?:date|description|details|transaction|withdrawal|deposit|debit|credit|balance|continued)\b/i.test(line)) rows[rows.length - 1] += ' ' + line;
+    datePattern.lastIndex = 0;
+  });
+  rows.forEach(function (line, rowNumber) {
     const dateMatch = line.match(datePattern);
     if (!dateMatch) return;
-    const parsedDate = parseLocalDate(dateMatch[0]);
+    let dateText = dateMatch[0];
+    if (!/\b\d{4}\b/.test(dateText)) {
+      if (/^[A-Za-z]/.test(dateText)) dateText += ' ' + statementYear;
+      else dateText += '/' + statementYear;
+    }
+    const parsedDate = parseLocalDate(dateText);
     if (!parsedDate || Number.isNaN(parsedDate.getTime())) return;
     const amounts = Array.from(line.matchAll(amountPattern));
     if (!amounts.length) return;
-    // Statement text commonly ends with a running balance. The first currency value
-    // after the date is the best candidate; the review message asks users to verify it.
     const chosen = amounts[0];
-    const rawAmount = displayValue(chosen[0]);
+    const amountToken = chosen[0];
+    const rawAmount = displayValue(amountToken.replace(/-$/, ''));
     if (!Number.isFinite(rawAmount) || rawAmount === 0) return;
-    const withoutDate = line.replace(dateMatch[0], ' ');
-    const description = withoutDate.replace(chosen[0], ' ').replace(/\b(?:CAD|USD|CR|DR)\b/gi, ' ').replace(/[|•·]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const description = line.replace(dateMatch[0], ' ').replace(amountPattern, ' ').replace(/\b(?:CAD|USD|CR|DR|DEBIT|CREDIT)\b/gi, ' ').replace(/[|•·]+/g, ' ').replace(/\s+/g, ' ').trim();
     if (!description || /^(?:date|balance|opening balance|closing balance|total|subtotal|continued)$/i.test(description)) return;
-    const isCredit = /payroll|salary|deposit|income|refund|received|interest earned|credit|cashback|reversal/i.test(line);
-    const amount = rawAmount < 0 ? rawAmount : (isCredit ? Math.abs(rawAmount) : -Math.abs(rawAmount));
+    const explicitlyNegative = /^\s*\(/.test(amountToken) || /^\s*-/.test(amountToken) || /-\s*$/.test(amountToken) || /\bDR\b|\bDEBIT\b/i.test(line);
+    const explicitlyPositive = /\bCR\b|\bCREDIT\b/i.test(line);
+    const incomeDescription = /payroll|salary|deposit|income|refund|received|interest earned|cashback|reversal/i.test(description);
+    const amount = explicitlyNegative || rawAmount < 0 ? -Math.abs(rawAmount) : (explicitlyPositive || incomeDescription ? Math.abs(rawAmount) : -Math.abs(rawAmount));
     transactions.push({ id: id(), date: dateKey(parsedDate), merchant: description.slice(0, 100), amount: Math.round(amount * 100) / 100, category: inferCategory(description, amount), account: '', notes: 'Extracted from statement; verify against the original.', source: filename + ' · extracted row ' + (rowNumber + 1) });
   });
   if (!transactions.length) throw new Error('No transaction rows could be confidently identified. You can still save the original statement and add transactions manually.');
@@ -798,6 +813,36 @@ async function handleSelectedStatement(file) {
   showToast('Choose a CSV, PDF, PNG, or JPEG statement.', true);
 }
 
+async function processSavedStatement(statementId) {
+  const statement = appData.statements.find(function (item) { return item.id === statementId; });
+  if (!statement || !statement.content) return;
+  if (Number(statement.size || 0) > MAX_STATEMENT_BYTES) { showToast('This statement is over the 5 MB processing limit.', true); return; }
+  try {
+    const mimeType = statement.mimeType || (statement.kind === 'pdf' ? 'application/pdf' : 'image/jpeg');
+    const file = new File([base64ToBytes(statement.content)], statement.name || 'statement', { type: mimeType });
+    $('#importTitle').textContent = 'Reading your saved statement…';
+    $('#importMessage').textContent = 'Extracting transaction rows from the encrypted statement on this device.';
+    $('#importPreview').innerHTML = '<div class="preview-warning" role="status">Preparing local document reader…</div>';
+    $('#pdfNameField').hidden = true;
+    $('#confirmImportButton').disabled = true;
+    showDialog('importDialog');
+    const extracted = await window.BudgetDocumentReader.extract(file, function (message) { $('#importMessage').textContent = message; });
+    const transactions = parseStatementTransactions(extracted.text, statement.name || 'Saved statement');
+    pendingImport = { kind: 'document-import', existingStatementId: statement.id, sourceKind: statement.kind, fileName: statement.name, size: statement.size, mimeType: mimeType, content: statement.content, transactions: transactions, extractionMethod: extracted.method };
+    $('#importTitle').textContent = 'Review extracted transactions';
+    $('#importMessage').textContent = statement.name + ' · ' + transactions.length + ' rows found with ' + extracted.method + '. Review these rows before adding them to Transactions.';
+    const sample = transactions.slice(0, 8).map(function (transaction) { return '<div class="preview-row"><strong>' + escapeHtml(formatShortDate(transaction.date)) + '</strong><span>' + escapeHtml(transaction.merchant) + '</span><em>' + (transaction.amount > 0 ? '+' : '−') + formatMoney(Math.abs(transaction.amount)) + '</em></div>'; }).join('');
+    $('#importPreview').innerHTML = '<div class="preview-warning">Check the dates, amounts, and income/expense signs against the statement. Balances can look like transaction amounts in some statement layouts.</div>' + sample + (transactions.length > 8 ? '<div class="preview-warning">Showing 8 of ' + transactions.length + ' rows.</div>' : '');
+    $('#confirmImportButton').textContent = 'Add transactions';
+    $('#confirmImportButton').disabled = false;
+  } catch (error) {
+    pendingImport = null;
+    closeDialog('importDialog');
+    $('#confirmImportButton').disabled = false;
+    showToast(error.message || 'Could not extract transactions from this statement.', true);
+  }
+}
+
 async function confirmImport() {
   if (!pendingImport) return;
   if (pendingImport.kind === 'document-only') {
@@ -819,15 +864,26 @@ async function confirmImport() {
     return;
   }
   const existing = new Set(appData.transactions.map(duplicateKey));
-  const additions = pendingImport.transactions.filter(function (transaction) { return !existing.has(duplicateKey(transaction)); });
+  const additions = pendingImport.transactions.filter(function (transaction) {
+    const key = duplicateKey(transaction);
+    if (existing.has(key)) return false;
+    existing.add(key);
+    return true;
+  });
   appData.transactions.push.apply(appData.transactions, additions);
   const sourceKind = pendingImport.sourceKind || 'csv';
-  appData.statements.push({ id: id(), kind: sourceKind, name: pendingImport.fileName, importedCount: additions.length, size: pendingImport.size, mimeType: pendingImport.mimeType || 'text/csv', content: pendingImport.content, addedAt: new Date().toISOString() });
+  if (pendingImport.existingStatementId) {
+    const savedStatement = appData.statements.find(function (item) { return item.id === pendingImport.existingStatementId; });
+    if (savedStatement) { savedStatement.importedCount = Number(savedStatement.importedCount || 0) + additions.length; savedStatement.lastProcessedAt = new Date().toISOString(); }
+  } else {
+    appData.statements.push({ id: id(), kind: sourceKind, name: pendingImport.fileName, importedCount: additions.length, size: pendingImport.size, mimeType: pendingImport.mimeType || 'text/csv', content: pendingImport.content, addedAt: new Date().toISOString() });
+  }
   await persist();
   pendingImport = null;
   closeDialog('importDialog');
   renderAll();
-  showToast(additions.length + ' transaction' + (additions.length === 1 ? '' : 's') + ' imported and statement saved.');
+  showPage('transactions');
+  showToast(additions.length + ' transaction' + (additions.length === 1 ? '' : 's') + ' added to Transactions.');
 }
 
 function createPlan(income) {
@@ -1035,6 +1091,8 @@ async function startApp() {
     if (contributeButton) { const amount = window.prompt('Contribution amount in CAD'); if (amount !== null) renderContribution(contributeButton.dataset.contributeGoal, amount); return; }
     const downloadStatementButton = event.target.closest('[data-download-statement]');
     if (downloadStatementButton) { downloadStatement(downloadStatementButton.dataset.downloadStatement); return; }
+    const processStatementButton = event.target.closest('[data-process-statement]');
+    if (processStatementButton) { processSavedStatement(processStatementButton.dataset.processStatement); return; }
     const deleteStatementButton = event.target.closest('[data-delete-statement]');
     if (deleteStatementButton) {
       const statement = appData.statements.find(function (item) { return item.id === deleteStatementButton.dataset.deleteStatement; });

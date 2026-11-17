@@ -9,7 +9,7 @@ See [SCHEMA.md](SCHEMA.md) for local storage and [CLOUD-SETUP.md](CLOUD-SETUP.md
 - Create and unlock an AES-GCM encrypted vault protected by a passphrase.
 - Optionally remember the vault key in this browser profile for one-click reopening. Anyone with access to that profile can reopen it; using **Lock** removes the remembered key.
 - Add, edit, filter, and delete income and expense transactions.
-- Import CSV transactions. The importer also extracts text from PDFs and runs OCR on scanned PDF pages and PNG/JPEG files in the browser. It presents a transaction preview; verify all dates, descriptions, and amounts before importing.
+- Import CSV transactions. The importer also extracts text from PDFs and runs OCR on scanned PDF pages and PNG/JPEG files in the browser. It presents a transaction preview; verify all dates, descriptions, and amounts before importing. Previously saved PDFs/images can be reprocessed from the Statements page.
 - Generate a budget from recent transaction history, edit category limits, and record savings goals.
 - Export and restore an encrypted backup, change the passphrase, lock the vault, or delete the local vault.
 - Optionally sign in with a passkey and sync the encrypted vault through a Supabase project. Passkey account login and the vault passphrase are separate: a new device needs the vault passphrase once to decrypt the downloaded vault.
