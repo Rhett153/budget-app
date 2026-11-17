@@ -1,8 +1,9 @@
 'use strict';
 
 const DB_NAME = 'budget-app-private-vault';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const VAULT_STORE = 'vault';
+const DEVICE_STORE = 'device';
 const KDF_ITERATIONS = 310000;
 const MAX_STATEMENT_BYTES = 5 * 1024 * 1024;
 const CATEGORIES = ['Housing', 'Utilities', 'Groceries', 'Dining', 'Transportation', 'Health', 'Debt', 'Subscriptions', 'Shopping', 'Personal care', 'Education', 'Travel', 'Income', 'Other'];
@@ -17,6 +18,9 @@ let appData = null;
 let selectedMonth = monthKey(new Date());
 let pendingImport = null;
 let toastTimer = null;
+let cloudSession = null;
+let cloudRevision = 0;
+let cloudMessage = '';
 
 function id() {
   if (window.crypto && typeof window.crypto.randomUUID === 'function') return window.crypto.randomUUID();
@@ -31,6 +35,7 @@ function openDatabase() {
     request.onupgradeneeded = function () {
       const db = request.result;
       if (!db.objectStoreNames.contains(VAULT_STORE)) db.createObjectStore(VAULT_STORE, { keyPath: 'id' });
+      if (!db.objectStoreNames.contains(DEVICE_STORE)) db.createObjectStore(DEVICE_STORE, { keyPath: 'id' });
     };
     request.onsuccess = function () { resolve(request.result); };
     request.onerror = function () { reject(request.error || new Error('Could not open local vault storage.')); };
@@ -63,6 +68,38 @@ async function dbDelete() {
     request.onsuccess = function () { resolve(); };
     request.onerror = function () { reject(request.error); };
   });
+}
+
+async function deviceRecordGet(idValue) {
+  const db = await openDatabase();
+  return new Promise(function (resolve, reject) {
+    const request = db.transaction(DEVICE_STORE, 'readonly').objectStore(DEVICE_STORE).get(idValue);
+    request.onsuccess = function () { resolve(request.result || null); };
+    request.onerror = function () { reject(request.error); };
+  });
+}
+
+async function deviceRecordPut(record) {
+  const db = await openDatabase();
+  return new Promise(function (resolve, reject) {
+    const request = db.transaction(DEVICE_STORE, 'readwrite').objectStore(DEVICE_STORE).put(record);
+    request.onsuccess = function () { resolve(); };
+    request.onerror = function () { reject(request.error || new Error('Could not save this device preference.')); };
+  });
+}
+
+async function deviceRecordDelete(idValue) {
+  const db = await openDatabase();
+  return new Promise(function (resolve, reject) {
+    const request = db.transaction(DEVICE_STORE, 'readwrite').objectStore(DEVICE_STORE).delete(idValue);
+    request.onsuccess = function () { resolve(); };
+    request.onerror = function () { reject(request.error); };
+  });
+}
+
+async function saveRememberedKey(key, enabled) {
+  if (enabled) await deviceRecordPut({ id: 'remembered-vault-key', key: key });
+  else await deviceRecordDelete('remembered-vault-key');
 }
 
 function requireCrypto() {
@@ -99,12 +136,10 @@ async function encryptState(data, key, existingSalt) {
   return { id: 'primary', version: 1, kdf: 'PBKDF2-SHA-256', iterations: KDF_ITERATIONS, salt: bytesToBase64(salt), iv: bytesToBase64(iv), ciphertext: bytesToBase64(new Uint8Array(encrypted)), updatedAt: new Date().toISOString() };
 }
 
-async function decryptRecord(record, passphrase) {
+async function decryptRecordWithKey(record, key) {
   requireCrypto();
   if (!record || !record.salt || !record.iv || !record.ciphertext) throw new Error('This backup is incomplete or not a Budget App vault.');
-  const salt = base64ToBytes(record.salt);
   const iv = base64ToBytes(record.iv);
-  const key = await deriveVaultKey(passphrase, salt);
   try {
     const clear = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv }, key, base64ToBytes(record.ciphertext));
     const parsed = JSON.parse(new TextDecoder().decode(clear));
@@ -112,6 +147,13 @@ async function decryptRecord(record, passphrase) {
   } catch (error) {
     throw new Error('That passphrase did not unlock this vault. Check it and try again.');
   }
+}
+
+async function decryptRecord(record, passphrase) {
+  requireCrypto();
+  if (!record || !record.salt) throw new Error('This backup is incomplete or not a Budget App vault.');
+  const key = await deriveVaultKey(passphrase, base64ToBytes(record.salt));
+  return decryptRecordWithKey(record, key);
 }
 
 function normalizeState(value) {
@@ -147,6 +189,85 @@ function showApp() {
   $('#appShell').hidden = false;
   $('#monthPicker').value = selectedMonth;
   renderAll();
+  refreshCloudControls();
+}
+
+function setCloudStatus(message) {
+  cloudMessage = message || '';
+  const status = document.getElementById('cloudSyncStatus');
+  if (status) status.textContent = cloudMessage;
+}
+
+function refreshCloudControls() {
+  const configured = window.BudgetCloud && window.BudgetCloud.isConfigured();
+  const signedIn = Boolean(cloudSession);
+  const enabled = Boolean(appData && appData.settings && appData.settings.cloudSyncEnabled);
+  const setHidden = function (idValue, hidden) { const element = document.getElementById(idValue); if (element) element.hidden = hidden; };
+  if (!configured) {
+    setHidden('emailCloudLinkButton', true); setHidden('passkeySignInButton', true); setHidden('registerPasskeyButton', true);
+    setHidden('enableCloudSyncButton', true); setHidden('syncNowButton', true); setHidden('cloudSignOutButton', true);
+    const notice = document.getElementById('cloudSyncSetupNotice');
+    if (notice) notice.textContent = 'Cloud sync is not configured yet. Create a Supabase project and add its project URL and publishable key to supabase-config.js. No data is sent until sync is enabled.';
+    setCloudStatus('Your vault remains local until cloud setup is complete.');
+    return;
+  }
+  const notice = document.getElementById('cloudSyncSetupNotice');
+  if (notice) notice.textContent = 'Passkey sign-in uses Supabase Auth. The server receives only the encrypted vault record after you enable sync.';
+  setHidden('emailCloudLinkButton', signedIn); setHidden('passkeySignInButton', signedIn); setHidden('registerPasskeyButton', !signedIn);
+  setHidden('enableCloudSyncButton', !signedIn || !appData || enabled); setHidden('syncNowButton', !signedIn || !appData || !enabled);
+  setHidden('cloudSignOutButton', !signedIn);
+  if (signedIn && !cloudMessage) setCloudStatus('Signed in' + (cloudSession.user && cloudSession.user.email ? ' as ' + cloudSession.user.email : '') + (enabled ? ' · encrypted sync on' : ' · sync off'));
+  if (!signedIn && !cloudMessage) setCloudStatus('Cloud account is not connected.');
+}
+
+async function saveCloudRevision(record, expectedRevision) {
+  const revision = await window.BudgetCloud.saveEncryptedVault(record, expectedRevision);
+  cloudRevision = revision;
+  await deviceRecordPut({ id: 'cloud-sync-state', revision: revision, lastSyncedUpdatedAt: record.updatedAt });
+  setCloudStatus('Encrypted vault synced. Cloud revision ' + revision + '.');
+  return revision;
+}
+
+async function prepareCloudVault() {
+  if (!cloudSession || !window.BudgetCloud || !window.BudgetCloud.isConfigured()) return;
+  try {
+    const remote = await window.BudgetCloud.getEncryptedVault();
+    const local = await dbGet();
+    const meta = await deviceRecordGet('cloud-sync-state');
+    if (!remote) {
+      cloudRevision = 0;
+      if (!local) setCloudStatus('Signed in. Create or restore a vault, then enable encrypted sync.');
+      else setCloudStatus('Signed in. Your existing vault is local; enable encrypted sync when you are ready.');
+      return;
+    }
+    cloudRevision = Number(remote.revision) || 0;
+    if (!local) {
+      await dbPut(Object.assign({}, remote.record, { id: 'primary' }));
+      vaultRecord = await dbGet();
+      await deviceRecordPut({ id: 'cloud-sync-state', revision: cloudRevision, lastSyncedUpdatedAt: remote.record.updatedAt });
+      setCloudStatus('Downloaded the encrypted vault. Enter its passphrase to unlock it on this device.');
+      return;
+    }
+    if (meta && cloudRevision > Number(meta.revision || 0) && local.updatedAt === meta.lastSyncedUpdatedAt) {
+      await dbPut(Object.assign({}, remote.record, { id: 'primary' }));
+      vaultRecord = await dbGet();
+      await deviceRecordPut({ id: 'cloud-sync-state', revision: cloudRevision, lastSyncedUpdatedAt: remote.record.updatedAt });
+      if (vaultKey) {
+        const unlocked = await decryptRecordWithKey(vaultRecord, vaultKey);
+        appData = unlocked.data;
+        renderAll();
+      }
+      setCloudStatus('Loaded the latest encrypted vault from your other device.');
+      return;
+    }
+    if (meta && cloudRevision === Number(meta.revision || 0)) {
+      setCloudStatus('Signed in. Cloud vault is up to date' + (appData && appData.settings.cloudSyncEnabled ? '.' : '; enable sync to start sharing this vault.') );
+      return;
+    }
+    setCloudStatus('A cloud vault exists, but this device has changes that are not confirmed as synced. It was left untouched to prevent overwriting data.');
+  } catch (error) {
+    setCloudStatus('Cloud check failed: ' + (error.message || 'try again from Privacy & backups.'));
+  }
 }
 
 async function persist() {
@@ -154,6 +275,14 @@ async function persist() {
   const record = await encryptState(appData, vaultKey, base64ToBytes(vaultRecord.salt));
   await dbPut(record);
   vaultRecord = record;
+  if (appData.settings.cloudSyncEnabled && cloudSession && window.BudgetCloud && window.BudgetCloud.isConfigured()) {
+    try {
+      const meta = await deviceRecordGet('cloud-sync-state');
+      await saveCloudRevision(record, Number(meta && meta.revision || 0));
+    } catch (error) {
+      setCloudStatus(error.message && error.message.includes('VAULT_REVISION_CONFLICT') ? 'Sync conflict: the cloud copy changed on another device. This device’s encrypted copy is still saved locally.' : 'Saved on this device; cloud sync failed: ' + (error.message || 'try again later.'));
+    }
+  }
 }
 
 function showToast(message, isError) {
@@ -390,9 +519,11 @@ function renderBudget() {
 
 function statementMarkup(statement, detailed) {
   const isPdf = statement.kind === 'pdf';
-  const icon = isPdf ? '<span class="statement-logo pdf-logo">PDF</span>' : '<span class="statement-logo">CSV</span>';
-  const detail = isPdf ? 'Encrypted PDF · ' + prettyBytes(statement.size || 0) : (statement.content ? 'Encrypted CSV · ' : 'CSV import · ') + Number(statement.importedCount || 0) + ' transactions';
-  const actions = detailed ? '<span class="statement-ready">Encrypted</span>' + (statement.content ? '<button class="download-button" data-download-statement="' + escapeHtml(statement.id) + '" aria-label="Download ' + (isPdf ? 'PDF' : 'CSV') + '">↓</button>' : '') + '<button class="download-button" data-delete-statement="' + escapeHtml(statement.id) + '" aria-label="Remove statement">×</button>' : '<span class="statement-ready">Saved here</span>';
+  const isImage = statement.kind === 'image';
+  const icon = isPdf ? '<span class="statement-logo pdf-logo">PDF</span>' : isImage ? '<span class="statement-logo">IMG</span>' : '<span class="statement-logo">CSV</span>';
+  const fileType = isPdf ? 'PDF' : isImage ? 'image' : 'CSV';
+  const detail = isPdf || isImage ? 'Encrypted ' + fileType + ' · ' + prettyBytes(statement.size || 0) + (statement.importedCount == null ? '' : ' · ' + Number(statement.importedCount) + ' transactions') : (statement.content ? 'Encrypted CSV · ' : 'CSV import · ') + Number(statement.importedCount || 0) + ' transactions';
+  const actions = detailed ? '<span class="statement-ready">Encrypted</span>' + (statement.content ? '<button class="download-button" data-download-statement="' + escapeHtml(statement.id) + '" aria-label="Download ' + fileType + '">↓</button>' : '') + '<button class="download-button" data-delete-statement="' + escapeHtml(statement.id) + '" aria-label="Remove statement">×</button>' : '<span class="statement-ready">Saved here</span>';
   return '<div class="statement-item">' + icon + '<span class="statement-info"><strong>' + escapeHtml(statement.name || 'Statement') + '</strong><small>' + escapeHtml(detail) + ' · ' + escapeHtml(formatShortDate(statement.addedAt)) + '</small></span>' + actions + '</div>';
 }
 
@@ -556,6 +687,33 @@ function parseCsvTransactions(text, filename) {
   return transactions;
 }
 
+function parseStatementTransactions(text, filename) {
+  const datePattern = /\b(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},?\s+\d{4})\b/i;
+  const amountPattern = /(?:\(\s*)?-?\s*\$?\s*\d[\d,]*\.\d{2}\s*\)?/g;
+  const transactions = [];
+  String(text || '').split(/\r?\n/).map(function (line) { return line.replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim(); }).filter(Boolean).forEach(function (line, rowNumber) {
+    const dateMatch = line.match(datePattern);
+    if (!dateMatch) return;
+    const parsedDate = parseLocalDate(dateMatch[0]);
+    if (!parsedDate || Number.isNaN(parsedDate.getTime())) return;
+    const amounts = Array.from(line.matchAll(amountPattern));
+    if (!amounts.length) return;
+    // Statement text commonly ends with a running balance. The first currency value
+    // after the date is the best candidate; the review message asks users to verify it.
+    const chosen = amounts[0];
+    const rawAmount = displayValue(chosen[0]);
+    if (!Number.isFinite(rawAmount) || rawAmount === 0) return;
+    const withoutDate = line.replace(dateMatch[0], ' ');
+    const description = withoutDate.replace(chosen[0], ' ').replace(/\b(?:CAD|USD|CR|DR)\b/gi, ' ').replace(/[|•·]+/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!description || /^(?:date|balance|opening balance|closing balance|total|subtotal|continued)$/i.test(description)) return;
+    const isCredit = /payroll|salary|deposit|income|refund|received|interest earned|credit|cashback|reversal/i.test(line);
+    const amount = rawAmount < 0 ? rawAmount : (isCredit ? Math.abs(rawAmount) : -Math.abs(rawAmount));
+    transactions.push({ id: id(), date: dateKey(parsedDate), merchant: description.slice(0, 100), amount: Math.round(amount * 100) / 100, category: inferCategory(description, amount), account: '', notes: 'Extracted from statement; verify against the original.', source: filename + ' · extracted row ' + (rowNumber + 1) });
+  });
+  if (!transactions.length) throw new Error('No transaction rows could be confidently identified. You can still save the original statement and add transactions manually.');
+  return transactions;
+}
+
 function duplicateKey(transaction) {
   return [transaction.date, Number(transaction.amount).toFixed(2), String(transaction.merchant).trim().toLowerCase()].join('|');
 }
@@ -595,29 +753,62 @@ async function handleSelectedStatement(file) {
   if (extension === 'csv' || file.type === 'text/csv') {
     try {
       const transactions = parseCsvTransactions(await file.text(), file.name);
-      pendingImport = { kind: 'csv', fileName: file.name.slice(0, 100), transactions: transactions, size: file.size, content: await fileToBase64(file) };
+      pendingImport = { kind: 'csv', sourceKind: 'csv', fileName: file.name.slice(0, 100), transactions: transactions, size: file.size, mimeType: 'text/csv', content: await fileToBase64(file) };
       renderImportPreview();
     } catch (error) { showToast(error.message || 'Could not read this CSV.', true); }
     return;
   }
-  if (extension === 'pdf' || file.type === 'application/pdf') {
+  if (['pdf', 'png', 'jpg', 'jpeg'].includes(extension) || file.type === 'application/pdf' || file.type === 'image/png' || file.type === 'image/jpeg') {
     try {
-      pendingImport = { kind: 'pdf', fileName: file.name.slice(0, 100), size: file.size, content: await fileToBase64(file) };
-      $('#importTitle').textContent = 'Save this PDF securely';
-      $('#importMessage').textContent = 'The PDF will be encrypted before being saved in this browser. This version does not extract transactions from PDF files.';
-      $('#importPreview').innerHTML = '<div class="preview-warning">' + escapeHtml(file.name) + ' · ' + prettyBytes(file.size) + '</div>';
-      $('#pdfNameField').hidden = false;
-      $('#pdfDocumentName').value = file.name.replace(/\.pdf$/i, '').slice(0, 100);
-      $('#confirmImportButton').textContent = 'Save encrypted PDF';
+      $('#importTitle').textContent = 'Reading your statement…';
+      $('#importMessage').textContent = 'The file stays in this browser while text is extracted. OCR may take a moment on scanned pages.';
+      $('#importPreview').innerHTML = '<div class="preview-warning" role="status">Preparing local document reader…</div>';
+      $('#pdfNameField').hidden = true;
+      $('#confirmImportButton').disabled = true;
       showDialog('importDialog');
-    } catch (error) { showToast(error.message || 'Could not read this PDF.', true); }
+      const extracted = await window.BudgetDocumentReader.extract(file, function (message) { $('#importMessage').textContent = message; });
+      const transactions = parseStatementTransactions(extracted.text, file.name);
+      const isPdf = extension === 'pdf' || file.type === 'application/pdf';
+      const sourceKind = isPdf ? 'pdf' : 'image';
+      const mimeType = file.type || (isPdf ? 'application/pdf' : 'image/' + (extension === 'jpg' ? 'jpeg' : extension));
+      pendingImport = { kind: 'document-import', sourceKind: sourceKind, fileName: file.name.slice(0, 100), size: file.size, mimeType: mimeType, content: await fileToBase64(file), transactions: transactions, extractionMethod: extracted.method };
+      $('#importTitle').textContent = 'Review extracted transactions';
+      $('#importMessage').textContent = file.name + ' · ' + transactions.length + ' rows found with ' + extracted.method + '. The source file will be stored encrypted with the import.';
+      const warning = '<div class="preview-warning">OCR can misread digits, dates, and balances. Check these sample rows against the statement; imported rows can be edited later.</div>';
+      const sample = transactions.slice(0, 8).map(function (transaction) { return '<div class="preview-row"><strong>' + escapeHtml(formatShortDate(transaction.date)) + '</strong><span>' + escapeHtml(transaction.merchant) + '</span><em>' + (transaction.amount > 0 ? '+' : '−') + formatMoney(Math.abs(transaction.amount)) + '</em></div>'; }).join('');
+      $('#importPreview').innerHTML = warning + sample + (transactions.length > 8 ? '<div class="preview-warning">Showing 8 of ' + transactions.length + ' extracted rows.</div>' : '');
+      $('#confirmImportButton').textContent = 'Import and save statement';
+      $('#confirmImportButton').disabled = false;
+    } catch (error) {
+      const isPdf = extension === 'pdf' || file.type === 'application/pdf';
+      try {
+        pendingImport = { kind: 'document-only', sourceKind: isPdf ? 'pdf' : 'image', fileName: file.name.slice(0, 100), size: file.size, mimeType: file.type || (isPdf ? 'application/pdf' : 'image/' + (extension === 'jpg' ? 'jpeg' : extension)), content: await fileToBase64(file) };
+        $('#importTitle').textContent = 'Save the original statement';
+        $('#importMessage').textContent = (error.message || 'Transactions could not be extracted.') + ' You can save the file encrypted and add transactions manually.';
+        $('#importPreview').innerHTML = '<div class="preview-warning">' + escapeHtml(file.name) + ' · ' + prettyBytes(file.size) + '</div>';
+        $('#confirmImportButton').textContent = 'Save without importing';
+        $('#confirmImportButton').disabled = false;
+      } catch (readError) {
+        closeDialog('importDialog'); pendingImport = null; $('#confirmImportButton').disabled = false;
+        showToast(readError.message || 'Could not read this statement.', true);
+      }
+    }
     return;
   }
-  showToast('Choose a CSV or PDF statement.', true);
+  showToast('Choose a CSV, PDF, PNG, or JPEG statement.', true);
 }
 
 async function confirmImport() {
   if (!pendingImport) return;
+  if (pendingImport.kind === 'document-only') {
+    appData.statements.push({ id: id(), kind: pendingImport.sourceKind, name: pendingImport.fileName, size: pendingImport.size, mimeType: pendingImport.mimeType, addedAt: new Date().toISOString(), content: pendingImport.content });
+    await persist();
+    pendingImport = null;
+    closeDialog('importDialog');
+    renderAll();
+    showToast('Original statement encrypted and saved in this browser.');
+    return;
+  }
   if (pendingImport.kind === 'pdf') {
     appData.statements.push({ id: id(), kind: 'pdf', name: ($('#pdfDocumentName').value || pendingImport.fileName).slice(0, 100), size: pendingImport.size, addedAt: new Date().toISOString(), content: pendingImport.content });
     await persist();
@@ -630,12 +821,13 @@ async function confirmImport() {
   const existing = new Set(appData.transactions.map(duplicateKey));
   const additions = pendingImport.transactions.filter(function (transaction) { return !existing.has(duplicateKey(transaction)); });
   appData.transactions.push.apply(appData.transactions, additions);
-  appData.statements.push({ id: id(), kind: 'csv', name: pendingImport.fileName, importedCount: additions.length, size: pendingImport.size, content: pendingImport.content, addedAt: new Date().toISOString() });
+  const sourceKind = pendingImport.sourceKind || 'csv';
+  appData.statements.push({ id: id(), kind: sourceKind, name: pendingImport.fileName, importedCount: additions.length, size: pendingImport.size, mimeType: pendingImport.mimeType || 'text/csv', content: pendingImport.content, addedAt: new Date().toISOString() });
   await persist();
   pendingImport = null;
   closeDialog('importDialog');
   renderAll();
-  showToast(additions.length + ' transaction' + (additions.length === 1 ? '' : 's') + ' imported.');
+  showToast(additions.length + ' transaction' + (additions.length === 1 ? '' : 's') + ' imported and statement saved.');
 }
 
 function createPlan(income) {
@@ -738,6 +930,7 @@ async function restoreBackup(file) {
     const existing = await dbGet();
     if (existing && !window.confirm('Restoring will replace the vault in this browser with the selected backup. Continue?')) return;
     await dbPut(Object.assign({}, record, { id: 'primary' }));
+    await deviceRecordDelete('remembered-vault-key');
     vaultRecord = await dbGet();
     vaultKey = null; appData = null;
     showGate(false);
@@ -752,8 +945,10 @@ async function downloadStatement(idValue) {
   if (!statement || !statement.content) return;
   const bytes = base64ToBytes(statement.content);
   const isPdf = statement.kind === 'pdf';
-  const extension = isPdf ? '.pdf' : '.csv';
-  const mimeType = isPdf ? 'application/pdf' : 'text/csv;charset=utf-8';
+  const isImage = statement.kind === 'image';
+  const originalExtension = String(statement.name || '').match(/\.(png|jpe?g|pdf|csv)$/i);
+  const extension = isPdf ? '.pdf' : isImage ? (originalExtension ? '.' + originalExtension[1].toLowerCase() : statement.mimeType === 'image/png' ? '.png' : '.jpg') : '.csv';
+  const mimeType = statement.mimeType || (isPdf ? 'application/pdf' : isImage ? 'image/jpeg' : 'text/csv;charset=utf-8');
   const url = URL.createObjectURL(new Blob([bytes], { type: mimeType }));
   const anchor = document.createElement('a');
   anchor.href = url; anchor.download = statement.name.toLowerCase().endsWith(extension) ? statement.name : statement.name + extension;
@@ -768,8 +963,8 @@ function fillCategorySelect(select, selected) {
 function lockVault(message) {
   vaultKey = null;
   appData = null;
-  vaultRecord = null;
-  dbGet().then(function (record) {
+  Promise.all([dbGet(), deviceRecordDelete('remembered-vault-key')]).then(function (results) {
+    const record = results[0];
     vaultRecord = record;
     showGate(!record, message || '');
   }).catch(function () { showGate(false, 'Could not read this browser vault. Refresh the page and try again.'); });
@@ -787,6 +982,7 @@ async function startApp() {
       appData = structuredClone(DEFAULT_STATE);
       vaultRecord = await encryptState(appData, vaultKey, salt);
       await dbPut(vaultRecord);
+      await saveRememberedKey(vaultKey, $('#rememberCreateDevice').checked);
       selectedMonth = monthKey(new Date()); setDefaultMonthPicker(); showApp();
       showToast('Your encrypted vault is ready. Download a backup from Privacy & backups.');
     } catch (error) { showGate(true, error.message || 'Could not create your encrypted vault.'); }
@@ -798,6 +994,7 @@ async function startApp() {
       vaultRecord = await dbGet();
       const unlocked = await decryptRecord(vaultRecord, $('#unlockPassphrase').value);
       vaultKey = unlocked.key; appData = unlocked.data; selectedMonth = monthKey(new Date()); setDefaultMonthPicker(); showApp();
+      await saveRememberedKey(vaultKey, $('#rememberUnlockDevice').checked);
     } catch (error) { showGate(false, error.message || 'Could not unlock this vault.'); }
   });
 
@@ -895,6 +1092,7 @@ async function startApp() {
   $('#deleteVaultButton').addEventListener('click', async function () {
     if (!window.confirm('Delete all encrypted Budget App data from this browser? This cannot be undone without a backup.')) return;
     await dbDelete();
+    await deviceRecordDelete('remembered-vault-key');
     vaultRecord = null; vaultKey = null; appData = null;
     showGate(true);
     showToast('The local vault was deleted.');
@@ -911,24 +1109,154 @@ async function startApp() {
       const salt = crypto.getRandomValues(new Uint8Array(16));
       const nextKey = await deriveVaultKey(updated, salt);
       const nextRecord = await encryptState(verified.data, nextKey, salt);
+      let nextRevision = null;
+      const syncEnabled = Boolean(verified.data.settings.cloudSyncEnabled && cloudSession && window.BudgetCloud && window.BudgetCloud.isConfigured());
+      if (syncEnabled) {
+        const meta = await deviceRecordGet('cloud-sync-state');
+        nextRevision = await window.BudgetCloud.saveEncryptedVault(nextRecord, Number(meta && meta.revision || 0));
+      }
       await dbPut(nextRecord);
       vaultRecord = nextRecord; vaultKey = nextKey; appData = verified.data;
+      if (syncEnabled) {
+        await deviceRecordPut({ id: 'cloud-sync-state', revision: nextRevision, lastSyncedUpdatedAt: nextRecord.updatedAt });
+        cloudRevision = nextRevision;
+        setCloudStatus('Passphrase changed and encrypted vault synced.');
+      }
+      if (await deviceRecordGet('remembered-vault-key')) await saveRememberedKey(nextKey, true);
       $('#changePassphraseForm').reset();
       showToast('Vault re-encrypted with the new passphrase.');
-    } catch (error) { showToast(error.message || 'Could not change the passphrase.', true); }
+    } catch (error) { showToast(error.message && error.message.includes('VAULT_REVISION_CONFLICT') ? 'The cloud copy changed on another device. Sync that copy before changing the passphrase.' : error.message || 'Could not change the passphrase.', true); }
+  });
+
+  $('#emailCloudLinkButton').addEventListener('click', async function () {
+    const email = $('#cloudEmail').value.trim();
+    if (!email) { setCloudStatus('Enter your email to start account setup.'); return; }
+    try {
+      await window.BudgetCloud.sendSignInLink(email);
+      cloudMessage = 'Check your email for a secure sign-in link. After confirming the account, return here and add a passkey.';
+      refreshCloudControls();
+      setCloudStatus(cloudMessage);
+    } catch (error) { setCloudStatus(error.message || 'Could not send the sign-in link.'); }
+  });
+
+  $('#passkeySignInButton').addEventListener('click', async function () {
+    try {
+      cloudSession = await window.BudgetCloud.signInWithPasskey();
+      if (!cloudSession) cloudSession = await window.BudgetCloud.getSession();
+      await prepareCloudVault();
+      refreshCloudControls();
+    } catch (error) { setCloudStatus(error.message || 'Passkey sign-in did not complete.'); }
+  });
+
+  $('#registerPasskeyButton').addEventListener('click', async function () {
+    try {
+      await window.BudgetCloud.registerPasskey();
+      setCloudStatus('Passkey added. Use it to sign into this account on your other devices.');
+      refreshCloudControls();
+    } catch (error) { setCloudStatus(error.message || 'Could not add a passkey. Confirm your email account first.'); }
+  });
+
+  $('#cloudSignOutButton').addEventListener('click', async function () {
+    try {
+      await window.BudgetCloud.signOut();
+      cloudSession = null; cloudRevision = 0; cloudMessage = '';
+      refreshCloudControls();
+      setCloudStatus('Signed out of the cloud account. This device’s local encrypted vault remains here.');
+    } catch (error) { setCloudStatus(error.message || 'Could not sign out.'); }
+  });
+
+  $('#enableCloudSyncButton').addEventListener('click', async function () {
+    if (!cloudSession || !appData || !vaultKey) { setCloudStatus('Unlock your vault and sign in before enabling sync.'); return; }
+    if (!window.confirm('This uploads the encrypted vault record, including encrypted transaction and statement files, to your Supabase project. Supabase receives ciphertext, not your passphrase or readable records. Enable sync?')) return;
+    const previous = Boolean(appData.settings.cloudSyncEnabled);
+    appData.settings.cloudSyncEnabled = true;
+    try {
+      const record = await encryptState(appData, vaultKey, base64ToBytes(vaultRecord.salt));
+      const meta = await deviceRecordGet('cloud-sync-state');
+      const revision = await window.BudgetCloud.saveEncryptedVault(record, Number(meta && meta.revision || 0));
+      await dbPut(record);
+      vaultRecord = record;
+      await deviceRecordPut({ id: 'cloud-sync-state', revision: revision, lastSyncedUpdatedAt: record.updatedAt });
+      cloudRevision = revision;
+      cloudMessage = 'Encrypted sync is on. Cloud revision ' + revision + '.';
+      refreshCloudControls();
+      setCloudStatus(cloudMessage);
+      showToast('Encrypted vault synced to your account.');
+    } catch (error) {
+      appData.settings.cloudSyncEnabled = previous;
+      setCloudStatus(error.message && error.message.includes('VAULT_REVISION_CONFLICT') ? 'A cloud vault already exists with different changes. No data was overwritten.' : error.message || 'Could not enable cloud sync.');
+    }
+  });
+
+  $('#syncNowButton').addEventListener('click', async function () {
+    if (!cloudSession || !appData || !vaultKey) return;
+    try {
+      const remote = await window.BudgetCloud.getEncryptedVault();
+      if (!remote) { setCloudStatus('No cloud copy exists yet. Enable encrypted sync to create one.'); return; }
+      const local = await dbGet();
+      const meta = await deviceRecordGet('cloud-sync-state');
+      if (meta && Number(remote.revision) > Number(meta.revision) && local.updatedAt === meta.lastSyncedUpdatedAt) {
+        await dbPut(Object.assign({}, remote.record, { id: 'primary' }));
+        vaultRecord = await dbGet();
+        const unlocked = await decryptRecordWithKey(vaultRecord, vaultKey);
+        appData = unlocked.data;
+        cloudRevision = Number(remote.revision);
+        await deviceRecordPut({ id: 'cloud-sync-state', revision: cloudRevision, lastSyncedUpdatedAt: remote.record.updatedAt });
+        renderAll();
+        setCloudStatus('Loaded the latest encrypted vault from your other device.');
+        return;
+      }
+      if (meta && Number(remote.revision) === Number(meta.revision)) {
+        if (local.updatedAt === meta.lastSyncedUpdatedAt) { setCloudStatus('Your devices are up to date.'); return; }
+        await saveCloudRevision(local, Number(remote.revision));
+        return;
+      }
+      setCloudStatus('Sync conflict: another device changed the cloud vault. Your local copy remains saved; no data was overwritten.');
+    } catch (error) { setCloudStatus(error.message || 'Could not sync this device.'); }
   });
 
   $$('.app-dialog').forEach(function (dialog) { dialog.addEventListener('click', function (event) { if (event.target === dialog) dialog.close(); }); });
 
   try {
     requireCrypto();
+    if (window.BudgetCloud && window.BudgetCloud.isConfigured()) {
+      try {
+        await window.BudgetCloud.init();
+        cloudSession = await window.BudgetCloud.getSession();
+        if (cloudSession) await prepareCloudVault();
+        await window.BudgetCloud.onAuthStateChange(async function (session) {
+          cloudSession = session;
+          cloudMessage = '';
+          if (cloudSession) await prepareCloudVault();
+          refreshCloudControls();
+        });
+      } catch (cloudError) { setCloudStatus(cloudError.message || 'Cloud account configuration needs attention.'); }
+    }
     vaultRecord = await dbGet();
+    if (vaultRecord) {
+      const remembered = await deviceRecordGet('remembered-vault-key');
+      if (remembered && remembered.key) {
+        try {
+          const unlocked = await decryptRecordWithKey(vaultRecord, remembered.key);
+          vaultKey = remembered.key;
+          appData = unlocked.data;
+          selectedMonth = monthKey(new Date());
+          setDefaultMonthPicker();
+          showApp();
+          showToast('Vault reopened on this device.');
+          return;
+        } catch (error) {
+          await deviceRecordDelete('remembered-vault-key');
+        }
+      }
+    }
     showGate(!vaultRecord);
     if (!vaultRecord) $('#restoreBackupLink').hidden = false;
   } catch (error) {
     showGate(true, error.message || 'Could not initialize the private vault.');
     $('#createVaultForm').querySelector('button[type="submit"]').disabled = true;
   }
+  refreshCloudControls();
   setDefaultMonthPicker();
 }
 

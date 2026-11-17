@@ -1,10 +1,10 @@
 # Budget App storage schema
 
-Budget App uses the browser's IndexedDB API. It is a document-style store, not a SQL database with one table per record type. The current implementation creates database `budget-app-private-vault` (version 1) with one object store, `vault`, whose key path is `id`.
+Budget App uses IndexedDB, a browser document store. Database `budget-app-private-vault` is version 2 and has two object stores: `vault` and `device`.
 
-## IndexedDB record
+## Encrypted vault record
 
-The object store currently contains one record with key `primary`:
+Object store `vault` has key path `id` and contains one record with key `primary`:
 
 ```ts
 type VaultRecord = {
@@ -12,14 +12,29 @@ type VaultRecord = {
   version: 1;
   kdf: "PBKDF2-SHA-256";
   iterations: 310000;
-  salt: string;       // Base64-encoded 16-byte random salt
-  iv: string;         // Base64-encoded 12-byte AES-GCM nonce
+  salt: string;       // Base64-encoded random salt
+  iv: string;         // Base64-encoded AES-GCM nonce
   ciphertext: string; // Base64-encoded encrypted UTF-8 JSON payload
   updatedAt: string;  // ISO 8601 timestamp
 };
 ```
 
-The passphrase is used with PBKDF2-SHA-256 to derive an AES-GCM 256-bit key. The app serializes the complete payload below to JSON, encrypts it, and stores only the encrypted result in `ciphertext`. The passphrase and cleartext payload are not stored in IndexedDB.
+The passphrase derives an AES-GCM key using PBKDF2-SHA-256. Only the encrypted payload is written to `vault`; the passphrase and cleartext payload are not stored there.
+
+## Device records
+
+Object store `device` has key path `id`. It may contain:
+
+```ts
+type RememberedKey = { id: "remembered-vault-key"; key: CryptoKey };
+type CloudSyncState = {
+  id: "cloud-sync-state";
+  revision: number;
+  lastSyncedUpdatedAt: string;
+};
+```
+
+The remembered, non-extractable CryptoKey is browser-profile-specific. It allows reopening without the passphrase on that profile. Locking removes that key. Cloud sync metadata is local bookkeeping; it contains no transaction data.
 
 ## Encrypted payload
 
@@ -31,6 +46,7 @@ type VaultPayload = {
   plans: Record<MonthKey, BudgetPlan>;
   settings: {
     monthlyIncome: number;
+    cloudSyncEnabled?: boolean;
   };
 };
 
@@ -42,60 +58,36 @@ type Transaction = {
   merchant: string;
   amount: number;     // Positive = income; negative = expense
   category: string;
-  account: string;    // User-entered account label, not a bank credential
+  account: string;    // User-entered label, not a bank credential
   notes: string;
   source: string;     // e.g. "manual" or imported filename
 };
 
 type Statement = {
   id: string;
-  kind: "csv" | "pdf";
+  kind: "csv" | "pdf" | "image";
   name: string;
-  size?: number;           // Original file size in bytes
+  mimeType?: string;
+  size?: number;
   content?: string;        // Original file, Base64-encoded inside encrypted payload
-  importedCount?: number;  // CSV transactions added after duplicate filtering
-  addedAt: string;         // ISO 8601 timestamp
-};
-
-type SavingsGoal = {
-  id: string;
-  name: string;
-  target: number;
-  saved: number;
-  targetDate: string; // YYYY-MM-DD, or empty string
-};
-
-type BudgetPlan = {
-  monthKey: MonthKey;
-  income: number;
-  categories: BudgetCategory[];
-  assumptions: string;
-  generatedAt: string; // ISO 8601 timestamp
-};
-
-type BudgetCategory = {
-  key: string;
-  name: string;
-  average: number; // Recent average expense used to suggest a limit
-  spent: number;   // Actual expense total for the plan month
-  budget: number;  // Editable planned limit
+  importedCount?: number;
+  addedAt: string;
 };
 ```
 
-`content` is optional to support older CSV imports created before source files were retained. Current CSV imports store the original CSV and parsed transaction rows together in the encrypted payload. PDF statements store the original PDF; PDF transaction extraction is not implemented.
+Transactions and statements are serialized together and encrypted as one vault payload. PDF text extraction and image OCR run in the browser; inspect the import preview before saving recognized transactions.
 
-## Storage layout
+## Optional cloud record
 
-```text
-IndexedDB: budget-app-private-vault (version 1)
-└── Object store: vault (keyPath: id)
-    └── key "primary": VaultRecord
-        └── ciphertext → encrypted VaultPayload
-            ├── transactions[]
-            ├── statements[]
-            ├── goals[]
-            ├── plans[YYYY-MM]
-            └── settings
+After the user configures a Supabase project and explicitly enables sync, one row per authenticated account is stored in `public.encrypted_vaults`:
+
+```ts
+type EncryptedVaultRow = {
+  user_id: string;       // Supabase Auth user UUID
+  record: VaultRecord;   // AES-GCM encrypted; opaque to the database
+  revision: number;      // Optimistic concurrency counter
+  updated_at: string;
+};
 ```
 
-The schema is implemented in [app.js](app.js), including IndexedDB setup, encryption, CSV parsing, and statement handling.
+Row-level security restricts reads to the owner. Writes use the `save_my_encrypted_vault` function and expected revision, so stale devices get a conflict instead of overwriting a newer row. The SQL is in [supabase-schema.sql](supabase-schema.sql); provider configuration is in [CLOUD-SETUP.md](CLOUD-SETUP.md).

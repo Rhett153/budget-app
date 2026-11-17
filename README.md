@@ -1,27 +1,32 @@
 # Budget App
 
-A local-first budgeting workspace published as a static site. It lets one person keep a private encrypted budget vault in a modern browser, enter transactions, import CSV statements, save PDFs, generate a monthly spending plan, and track savings goals.
+A local-first budgeting workspace published as a static site. It stores a private encrypted vault in the browser, imports CSV/PDF/image statements, creates a budget plan, and tracks savings goals.
 
-See [SCHEMA.md](SCHEMA.md) for the IndexedDB and encrypted payload schema.
+See [SCHEMA.md](SCHEMA.md) for local storage and [CLOUD-SETUP.md](CLOUD-SETUP.md) for optional account and sync setup.
 
 ## What works
 
-- Create and unlock a passphrase-protected vault stored in this browser using IndexedDB, PBKDF2, and AES-GCM.
+- Create and unlock an AES-GCM encrypted vault protected by a passphrase.
+- Optionally remember the vault key in this browser profile for one-click reopening. Anyone with access to that profile can reopen it; using **Lock** removes the remembered key.
 - Add, edit, filter, and delete income and expense transactions.
-- Import CSV files with common date, amount, debit/credit, description, and category columns. Imports are previewed and likely duplicates are skipped; the source CSV is saved in the encrypted vault and can be downloaded later.
-- Save PDF statements encrypted in the vault and download them again later. PDF text extraction is not included.
-- Generate a budget from up to three months of transaction history, edit category limits, and record savings goals.
-- Export and restore an encrypted backup, change the vault passphrase, lock the vault, or delete it from this browser.
+- Import CSV transactions. The importer also extracts text from PDFs and runs OCR on scanned PDF pages and PNG/JPEG files in the browser. It presents a transaction preview; verify all dates, descriptions, and amounts before importing.
+- Generate a budget from recent transaction history, edit category limits, and record savings goals.
+- Export and restore an encrypted backup, change the passphrase, lock the vault, or delete the local vault.
+- Optionally sign in with a passkey and sync the encrypted vault through a Supabase project. Passkey account login and the vault passphrase are separate: a new device needs the vault passphrase once to decrypt the downloaded vault.
 
 ## Privacy and limitations
 
-This is a single-device MVP. The static website code is public, but it does not send the passphrase or vault contents to a server. Financial records and uploaded PDFs are encrypted in the browser before being written to IndexedDB. This project has no account system, cloud backup, multi-device sync, bank connection, automatic bank feed, or PDF transaction extraction. Do not enter bank passwords. Backups are encrypted but should still be stored somewhere private. If you lose both the passphrase and a usable backup, the data cannot be recovered.
+Without cloud setup and explicit sync enablement, the app keeps data in this browser's IndexedDB. OCR and encryption run in the browser. When sync is enabled, the Supabase project receives the encrypted vault envelope; it does not receive the vault passphrase or readable transactions. The passkey signs into the account but does not decrypt the vault.
 
-The budget plan is a simple estimate based on recent recorded transactions or an income amount you provide. Review and adjust the result; it is not financial advice.
+PDF/image recognition depends on statement layout and image quality. Review the preview; OCR can misread amounts and dates. PDF.js, Tesseract.js, and Supabase JS are loaded from pinned-version public CDNs. Browser access to these packages requires an internet connection.
+
+The Supabase passkey API is currently experimental. Cross-device passkey availability depends on the passkey provider (for example, the same password manager/keychain or a separately registered passkey). See [CLOUD-SETUP.md](CLOUD-SETUP.md) before enabling it. Do not enter bank passwords. Keep an encrypted backup somewhere private. If you lose both the passphrase and a usable backup, the data cannot be recovered.
+
+The budget plan is an estimate based on recent recorded transactions or an income amount you provide. Review and adjust it; it is not financial advice.
 
 ## Run locally
 
-No build step or external dependencies are required. Open the hosted HTTPS site, or serve this directory with a static web server. Browser encryption and IndexedDB work in modern browsers on secure origins (HTTPS or localhost).
+Open the hosted HTTPS site, or serve this directory with a static web server. Browser encryption, passkeys, and IndexedDB require a modern browser on HTTPS or localhost.
 
 ## Deploy
 
